@@ -5,6 +5,45 @@
 #include "gfx_mono_text.h"
 #include "sysfont.h"
 
+/*PWM LEDS */
+#define PIO_PWM_0 PIOD
+#define ID_PIO_PWM_0 ID_PIOD
+#define MASK_PIN_PWM_0 (1 << 11)
+
+#define PIO_PWM_0 PIOA
+#define ID_PIO_PWM_0 ID_PIOA
+#define MASK_PIN_PWM_0 (1 << 2)
+
+#define PIO_PWM_0 PIOC
+#define ID_PIO_PWM_0 ID_PIOC
+#define MASK_PIN_PWM_0 (1 << 19)
+
+/*AFEC */ 
+#define AFEC_POT AFEC0
+#define AFEC_POT_ID ID_AFEC0
+#define AFEC_POT_CHANNEL 0 // Canal do pino PD30
+
+/*globals*/
+/** The conversion data is done flag */
+volatile bool g_is_conversion_done = false;
+
+/** The conversion data value */
+volatile uint32_t g_ul_value = 0;
+
+/*STRUCTS*/
+typedef struct Queue{
+	int r;
+	int g;
+	int b;	
+}xQueueRGB;
+
+
+/*FILAS*/
+QueueHandle_t xQueueAFEC;
+
+
+
+
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
@@ -40,16 +79,87 @@ extern void vApplicationMallocFailedHook(void) {
 /************************************************************************/
 /* handlers / callbacks                                                 */
 /************************************************************************/
+static void AFEC_pot_Callback(void){
+	//g_ul_value = afec_channel_get_value(AFEC_POT, AFEC_POT_CHANNEL);
+	//g_is_conversion_done = true;
+	xQueueSend xQueueAFEC;
+}
 
 /************************************************************************/
 /* TASKS                                                                */
 /************************************************************************/
 
 static void task_led(void *pvParameters) {
+	pmc_enable_periph_clk(ID_PIOD);
+	pio_set_peripheral(PIOD, PIO_PERIPH_B, 1 << 11);
+	
+	pmc_enable_periph_clk(ID_PIOA);
+	pio_set_peripheral(PIOA, PIO_PERIPH_A, 1 << 2);
 
+	pmc_enable_periph_clk(ID_PIOC);
+	pio_set_peripheral(PIOC, PIO_PERIPH_B, 1 << 19);
+	
+	/* inicializa PWM com duty cycle 23*/
+	/* MUITO IMPORTANTE CRIAR UM pwm_channel_t POR CANAL */
+	static pwm_channel_t pwm_channel_pin;
+	PWM_init(PWM0, ID_PWM0,  &pwm_channel_pin, PWM_CHANNEL_0, 23);
+	
+	int duty = 0;
+	
+	/*xQueueRGB * xQueueCreate(){
+		xQueueRGB * Q;
+		Q -> r = 
+	};*/
+	
 	while (1) {
-
+		for(duty = 0; duty <= 255; duty++){
+			pwm_channel_update_duty(PWM0, &pwm_channel_pin, 255-duty);
+			//xQueueSend xQueueRGB();
+			delay_ms(10);
+			}
+    /* fade out*/
+		for(duty = 0; duty <= 255; duty++){
+			pwm_channel_update_duty(PWM0, &pwm_channel_pin, duty);
+			delay_ms(10);
+		}
 	}
+}
+
+
+static void task_afec(void *pvParameters){
+	  const usart_serial_options_t usart_serial_options = {
+		  .baudrate     = CONF_UART_BAUDRATE,
+		  .charlength   = CONF_UART_CHAR_LENGTH,
+		  .paritytype   = CONF_UART_PARITY,
+		  .stopbits     = CONF_UART_STOP_BITS
+	  };
+	  
+	    /* Initialize stdio on USART */
+	    stdio_serial_init(CONF_UART, &usart_serial_options);
+
+	    /* inicializa e configura adc */
+	    config_AFEC_pot(AFEC_POT, AFEC_POT_ID, AFEC_POT_CHANNEL, AFEC_pot_Callback);
+	    
+	    /* Selecina canal e inicializa conversão */
+	    afec_channel_enable(AFEC_POT, AFEC_POT_CHANNEL);
+	    afec_start_software_conversion(AFEC_POT);
+		
+		RTT_init(0.1);
+
+	  
+	    while(1){
+		    if(g_is_conversion_done){
+			    g_is_conversion_done = 0;
+			    printf("%d\n", g_ul_value);
+			    delay_ms(500);
+			    
+			    /* Selecina canal e inicializa conversão */
+			    afec_channel_enable(AFEC_POT, AFEC_POT_CHANNEL);
+			    afec_start_software_conversion(AFEC_POT);
+		    }
+	    }
+
+
 }
 
 /************************************************************************/
@@ -57,7 +167,16 @@ static void task_led(void *pvParameters) {
 /************************************************************************/
 
 void wheel( uint WheelPos, uint *r, uint *g, uint *b ) {
-
+	double conversion_rate = 16.058;
+	WheelPos = 255 - (WheelPos/conversion_rate);
+	
+	if(WheelPos < 85){
+		return *r;
+	}else if(WheelPos < 170){
+		return *g;
+	}else{
+		return *b;
+	}
 }
 
 static void config_AFEC_pot(Afec *afec, uint32_t afec_id, uint32_t afec_channel,
@@ -196,6 +315,8 @@ int main(void) {
 
 	/* Initialize the console uart */
 	configure_console();
+	
+	
 
 	/* Create task to control oled */
 	if (xTaskCreate(task_led, "led", TASK_OLED_STACK_SIZE, NULL,
